@@ -25,7 +25,7 @@ router.get("/museums", async (req, res) => {
                     M.DESCRIPTION AS "description", M.PHONE AS "phone", M.EMAIL AS "email", M.WEBSITE_URL AS "websiteUrl",
                     M.OPENING_TIME AS "openingTime",
                     M.CLOSING_TIME AS "closingTime", M.STATUS AS "status",
-                    (SELECT COUNT(*) FROM EXHIBITIONS E WHERE E.MUSEUM_ID = M.MUSEUM_ID AND E.STATUS <> 'CANCELLED') AS "exhibitionCount",
+                    (SELECT COUNT(*) FROM EXHIBITIONS E WHERE E.MUSEUM_ID = M.MUSEUM_ID AND E.STATUS = 'OPEN') AS "exhibitionCount",
                     (SELECT NVL(ROUND(AVG(R.RATING), 1), 0) FROM REVIEWS R WHERE R.MUSEUM_ID = M.MUSEUM_ID) AS "rating"
                  FROM MUSEUMS M
                  WHERE M.STATUS = 'ACTIVE' AND (LOWER(M.NAME) LIKE :search OR LOWER(M.LOCATION) LIKE :search)
@@ -53,7 +53,7 @@ router.get("/museums/:id", async (req, res) => {
                 `SELECT EXHIBITION_ID AS "id", TITLE AS "title", DESCRIPTION AS "description",
                         TO_CHAR(START_DATE, 'YYYY-MM-DD') AS "startDate",
                         TO_CHAR(END_DATE, 'YYYY-MM-DD') AS "endDate", TICKET_PRICE AS "ticketPrice", STATUS AS "status"
-                 FROM EXHIBITIONS WHERE MUSEUM_ID = :id ORDER BY START_DATE`,
+                 FROM EXHIBITIONS WHERE MUSEUM_ID = :id AND STATUS = 'OPEN' ORDER BY START_DATE`,
                 { id: req.params.id }
             );
             const artworks = await db.execute(
@@ -92,7 +92,7 @@ router.get("/exhibitions", async (req, res) => {
                     TO_CHAR(E.END_DATE, 'YYYY-MM-DD') AS "endDate",
                     E.TICKET_PRICE AS "ticketPrice", E.STATUS AS "status"
              FROM EXHIBITIONS E JOIN MUSEUMS M ON M.MUSEUM_ID = E.MUSEUM_ID
-             WHERE E.STATUS <> 'CANCELLED'
+             WHERE E.STATUS = 'OPEN'
                AND (LOWER(E.TITLE) LIKE :search OR LOWER(E.DESCRIPTION) LIKE :search)
                AND (:museumId IS NULL OR E.MUSEUM_ID = :museumId)
              ORDER BY E.START_DATE`,
@@ -156,7 +156,8 @@ router.get("/artworks", async (req, res) => {
 protectedRouter.post("/bookings", async (req, res) => {
     const exhibitionId = Number(req.body.exhibitionId);
     const visitDate = String(req.body.visitDate || "");
-    if (!Number.isInteger(exhibitionId) || !/^\d{4}-\d{2}-\d{2}$/.test(visitDate)) {
+    const quantity = Number(req.body.quantity || 1);
+    if (!Number.isInteger(exhibitionId) || !/^\d{4}-\d{2}-\d{2}$/.test(visitDate) || !Number.isInteger(quantity) || quantity < 1 || quantity > 4) {
         return res.status(400).json({ message: "A valid exhibition and visit date are required." });
     }
     try {
@@ -174,20 +175,24 @@ protectedRouter.post("/bookings", async (req, res) => {
                  WHERE EXHIBITION_ID = :exhibitionId
                                      AND TO_DATE(:visitDate, 'YYYY-MM-DD') >= TRUNC(SYSDATE)
                                      AND TO_DATE(:visitDate, 'YYYY-MM-DD') BETWEEN TRUNC(START_DATE) AND TRUNC(END_DATE)
-                   AND STATUS <> 'CANCELLED'`,
+                   AND STATUS = 'OPEN'`,
                 { exhibitionId, visitDate }
             );
             if (item.USER_STATUS !== "ACTIVE" || item.STATUS === "CANCELLED" || !dateCheck.rows[0].count) {
                 throw Object.assign(new Error("This exhibition is not available for the selected date."), { status: 422 });
             }
-            const result = await db.execute(
-                `INSERT INTO TICKETS (USER_ID, EXHIBITION_ID, VISIT_DATE, PRICE, STATUS)
-                 VALUES (:userId, :exhibitionId, TO_DATE(:visitDate, 'YYYY-MM-DD'), :price, 'PENDING')
-                 RETURNING TICKET_ID INTO :ticketId`,
-                { userId: req.user.userId, exhibitionId, visitDate, price: item.TICKET_PRICE, ticketId: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER } },
-                { autoCommit: true }
-            );
-            return { ticketId: result.outBinds.ticketId[0], status: "PENDING", price: item.TICKET_PRICE, visitDate };
+            const ticketIds = [];
+            for (let index = 0; index < quantity; index += 1) {
+                const result = await db.execute(
+                    `INSERT INTO TICKETS (USER_ID, EXHIBITION_ID, VISIT_DATE, PRICE, STATUS)
+                     VALUES (:userId, :exhibitionId, TO_DATE(:visitDate, 'YYYY-MM-DD'), :price, 'PENDING')
+                     RETURNING TICKET_ID INTO :ticketId`,
+                    { userId: req.user.userId, exhibitionId, visitDate, price: item.TICKET_PRICE, ticketId: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER } }
+                );
+                ticketIds.push(result.outBinds.ticketId[0]);
+            }
+            await db.commit();
+            return { ticketId: ticketIds[0], ticketIds, quantity, status: "PENDING", price: item.TICKET_PRICE, totalPrice: Number(item.TICKET_PRICE) * quantity, visitDate };
         });
         return res.status(201).json(booking);
     } catch (error) {

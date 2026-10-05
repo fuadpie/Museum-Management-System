@@ -28,6 +28,15 @@ This audit compares the current Museum & Art Gallery Visitor Portal with the sup
 - Added a migration runner invoked during backend startup.
 - Added Zod to the backend dependency manifest for incremental endpoint validation.
 
+## Visitor booking and discovery fixes
+
+- Public exhibition lists and museum detail pages now expose only `OPEN` exhibitions; managers retain their complete management view.
+- Booking creation validates `OPEN` status server-side and rejects quantities outside 1–4.
+- Multi-ticket bookings create one authoritative database ticket per admission and return the ticket IDs and database-derived total; each ticket is then paid through the existing payment route.
+- Visitor booking UI prevents duplicate submission, shows quantity and total, and uses a shared Bangladeshi Taka formatter.
+- Museum detail loading now validates the selected ID and provides an explicit retry/not-found state.
+- Frontend validation: production build passed; lint has only the two pre-existing React hook dependency warnings.
+
 ## Known gaps for the next phases
 
 - `PROJECT_SPEC.md` is missing.
