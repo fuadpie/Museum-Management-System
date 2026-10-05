@@ -30,10 +30,10 @@ router.post("/register", async (req, res) => {
     const email = String(req.body.email || "").trim().toLowerCase();
     const password = String(req.body.password || "");
     const phone = String(req.body.phone || "").trim();
-    const birthDate = String(req.body.birthDate || "").trim();
     const city = String(req.body.city || "").trim();
     const country = String(req.body.country || "").trim();
     const interests = String(req.body.interests || "").trim();
+    const birthDate = String(req.body.birthDate || "").trim();
 
     if (!name || !email || password.length < 8) {
         return res.status(400).json({ message: "Name, a valid email and an 8-character password are required." });
@@ -169,12 +169,12 @@ router.get("/me", authenticateToken, async (req, res) => {
     try {
         connection = await connectToDatabase();
         const result = await connection.execute(
-            "SELECT USER_ID, NAME, EMAIL, PHONE, CITY, COUNTRY, INTERESTS, ROLE, STATUS, CREATED_AT FROM USERS WHERE USER_ID = :userId",
+            "SELECT USER_ID, NAME, EMAIL, PHONE, BIRTH_DATE, CITY, COUNTRY, INTERESTS, ROLE, STATUS, CREATED_AT FROM USERS WHERE USER_ID = :userId",
             { userId: req.user.userId }
         );
         if (!result.rows.length) return res.status(404).json({ message: "User not found." });
         const user = result.rows[0];
-        return res.json({ user: { id: user.USER_ID, name: user.NAME, email: user.EMAIL, phone: user.PHONE, city: user.CITY, country: user.COUNTRY, interests: user.INTERESTS, role: user.ROLE, status: user.STATUS, createdAt: user.CREATED_AT } });
+        return res.json({ user: { id: user.USER_ID, name: user.NAME, email: user.EMAIL, phone: user.PHONE, birthDate: user.BIRTH_DATE, city: user.CITY, country: user.COUNTRY, interests: user.INTERESTS, role: user.ROLE, status: user.STATUS, createdAt: user.CREATED_AT } });
     } catch (error) {
         console.error("Profile error:", error);
         return res.status(500).json({ message: "Server error while retrieving profile." });
@@ -191,12 +191,14 @@ router.put("/profile", authenticateToken, async (req, res) => {
     const city = String(req.body.city || "").trim();
     const country = String(req.body.country || "").trim();
     const interests = String(req.body.interests || "").trim();
+    const birthDate = String(req.body.birthDate || "").trim();
     if (!name) return res.status(400).json({ message: "Name is required." });
     try {
         await withConnection((db) => db.execute(
-            `UPDATE USERS SET NAME = :name, PHONE = :phone, CITY = :city, COUNTRY = :country, INTERESTS = :interests
+            `UPDATE USERS SET NAME = :name, PHONE = :phone, CITY = :city, COUNTRY = :country, INTERESTS = :interests,
+             BIRTH_DATE = ${birthDate ? "TO_DATE(:birthDate, 'YYYY-MM-DD')" : "NULL"}
              WHERE USER_ID = :userId`,
-            { name, phone, city, country, interests, userId: req.user.userId },
+            { name, phone, city, country, interests, birthDate: birthDate || null, userId: req.user.userId },
             { autoCommit: true }
         ));
         return res.json({ message: "Profile updated." });
@@ -209,12 +211,15 @@ router.put("/profile", authenticateToken, async (req, res) => {
 router.put("/password", authenticateToken, async (req, res) => {
     const currentPassword = String(req.body.currentPassword || "");
     const newPassword = String(req.body.newPassword || "");
+    const confirmPassword = String(req.body.confirmPassword || "");
     if (newPassword.length < 8) return res.status(400).json({ message: "New password must be at least 8 characters." });
+    if (newPassword !== confirmPassword) return res.status(400).json({ message: "New password and confirmation do not match." });
     let connection;
     try {
         connection = await connectToDatabase();
         const result = await connection.execute("SELECT PASSWORD_HASH FROM USERS WHERE USER_ID = :userId", { userId: req.user.userId });
         if (!result.rows.length || !(await bcrypt.compare(currentPassword, result.rows[0].PASSWORD_HASH))) return res.status(401).json({ message: "Current password is incorrect." });
+        if (await bcrypt.compare(newPassword, result.rows[0].PASSWORD_HASH)) return res.status(400).json({ message: "Your new password must be different from your current password." });
         await connection.execute("UPDATE USERS SET PASSWORD_HASH = :passwordHash WHERE USER_ID = :userId", { passwordHash: await bcrypt.hash(newPassword, 12), userId: req.user.userId }, { autoCommit: true });
         return res.json({ message: "Password changed successfully." });
     } catch (error) {

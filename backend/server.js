@@ -2,9 +2,9 @@ const express = require("express");
 const cors = require("cors");
 const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
-const connectToDatabase = require("./config/database");
 const authRoutes = require("./routes/auth");
 const resourceRoutes = require("./routes/resources");
+const runMigrations = require("./sql/runMigrations");
 
 const app = express();
 
@@ -31,9 +31,7 @@ app.use("/api", resourceRoutes);
 // Start server
 async function startServer() {
     try {
-        const connection = await connectToDatabase();
-
-        await connection.close();
+        await runMigrations();
 
         app.listen(PORT, () => {
             console.log(`Server running on http://localhost:${PORT}`);

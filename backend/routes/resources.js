@@ -22,7 +22,8 @@ router.get("/museums", async (req, res) => {
     try {
         const museums = await withConnection((db) => db.execute(
                 `SELECT M.MUSEUM_ID AS "id", M.NAME AS "name", M.LOCATION AS "location",
-                    M.DESCRIPTION AS "description", M.OPENING_TIME AS "openingTime",
+                    M.DESCRIPTION AS "description", M.PHONE AS "phone", M.EMAIL AS "email", M.WEBSITE_URL AS "websiteUrl",
+                    M.OPENING_TIME AS "openingTime",
                     M.CLOSING_TIME AS "closingTime", M.STATUS AS "status",
                     (SELECT COUNT(*) FROM EXHIBITIONS E WHERE E.MUSEUM_ID = M.MUSEUM_ID AND E.STATUS <> 'CANCELLED') AS "exhibitionCount",
                     (SELECT NVL(ROUND(AVG(R.RATING), 1), 0) FROM REVIEWS R WHERE R.MUSEUM_ID = M.MUSEUM_ID) AS "rating"
@@ -43,6 +44,7 @@ router.get("/museums/:id", async (req, res) => {
         const data = await withConnection(async (db) => {
             const museum = await db.execute(
                 `SELECT MUSEUM_ID AS "id", NAME AS "name", LOCATION AS "location", DESCRIPTION AS "description",
+                        M.PHONE AS "phone", M.EMAIL AS "email", M.WEBSITE_URL AS "websiteUrl",
                         OPENING_TIME AS "openingTime", CLOSING_TIME AS "closingTime", STATUS AS "status"
                  FROM MUSEUMS WHERE MUSEUM_ID = :id`,
                 { id: req.params.id }
@@ -116,7 +118,8 @@ router.get("/exhibitions/:id", async (req, res) => {
             );
             const artworks = await db.execute(
                 `SELECT ARTWORK_ID AS "id", TITLE AS "title", ARTIST_NAME AS "artistName",
-                        CREATION_YEAR AS "creationYear", CATEGORY AS "category", DESCRIPTION AS "description"
+                        CREATION_YEAR AS "creationYear", CATEGORY AS "category", DESCRIPTION AS "description",
+                        IMAGE_URL AS "imageUrl"
                  FROM ARTWORKS WHERE EXHIBITION_ID = :id ORDER BY TITLE`,
                 { id: req.params.id }
             );
@@ -136,7 +139,7 @@ router.get("/artworks", async (req, res) => {
         const data = await withConnection((db) => db.execute(
             `SELECT A.ARTWORK_ID AS "id", A.TITLE AS "title", A.ARTIST_NAME AS "artistName",
                     A.CREATION_YEAR AS "creationYear", A.CATEGORY AS "category", A.DESCRIPTION AS "description",
-                    E.TITLE AS "exhibitionTitle", M.NAME AS "museumName"
+                    E.TITLE AS "exhibitionTitle", M.NAME AS "museumName", A.IMAGE_URL AS "imageUrl"
              FROM ARTWORKS A JOIN EXHIBITIONS E ON E.EXHIBITION_ID = A.EXHIBITION_ID
              JOIN MUSEUMS M ON M.MUSEUM_ID = E.MUSEUM_ID
              WHERE LOWER(A.TITLE) LIKE :search OR LOWER(A.ARTIST_NAME) LIKE :search OR LOWER(A.CATEGORY) LIKE :search
@@ -169,7 +172,8 @@ protectedRouter.post("/bookings", async (req, res) => {
             const dateCheck = await db.execute(
                 `SELECT COUNT(*) AS "count" FROM EXHIBITIONS
                  WHERE EXHIBITION_ID = :exhibitionId
-                   AND :visitDate BETWEEN TO_CHAR(START_DATE, 'YYYY-MM-DD') AND TO_CHAR(END_DATE, 'YYYY-MM-DD')
+                                     AND TO_DATE(:visitDate, 'YYYY-MM-DD') >= TRUNC(SYSDATE)
+                                     AND TO_DATE(:visitDate, 'YYYY-MM-DD') BETWEEN TRUNC(START_DATE) AND TRUNC(END_DATE)
                    AND STATUS <> 'CANCELLED'`,
                 { exhibitionId, visitDate }
             );
@@ -326,15 +330,21 @@ router.put("/museum-manager/profile", authenticateToken, async (req, res) => {
     const name = String(req.body.name || "").trim();
     const location = String(req.body.location || "").trim();
     const description = String(req.body.description || "").trim();
+    const phone = String(req.body.phone || "").trim();
+    const email = String(req.body.email || "").trim();
+    const websiteUrl = String(req.body.websiteUrl || "").trim();
     const openingTime = String(req.body.openingTime || "").trim();
     const closingTime = String(req.body.closingTime || "").trim();
     if (!name || !location) return res.status(400).json({ message: "Museum name and location are required." });
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ message: "Enter a valid museum email." });
+    if (websiteUrl && !/^https?:\/\/\S+$/i.test(websiteUrl)) return res.status(400).json({ message: "Website must start with http:// or https://." });
     try {
         const result = await withConnection((db) => db.execute(
             `UPDATE MUSEUMS SET NAME = :name, LOCATION = :location, DESCRIPTION = :description,
+             PHONE = :phone, EMAIL = :email, WEBSITE_URL = :websiteUrl,
              OPENING_TIME = :openingTime, CLOSING_TIME = :closingTime
              WHERE OWNER_USER_ID = :userId`,
-            { name, location, description, openingTime: openingTime || null, closingTime: closingTime || null, userId: req.user.userId },
+            { name, location, description, phone: phone || null, email: email || null, websiteUrl: websiteUrl || null, openingTime: openingTime || null, closingTime: closingTime || null, userId: req.user.userId },
             { autoCommit: true }
         ));
         if (!result.rowsAffected) return res.status(404).json({ message: "Museum profile not found." });
@@ -345,13 +355,271 @@ router.put("/museum-manager/profile", authenticateToken, async (req, res) => {
     }
 });
 
+router.patch("/museum-manager/status", authenticateToken, async (req, res) => {
+    if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
+    const status = String(req.body.status || "").toUpperCase();
+    if (!["ACTIVE", "INACTIVE"].includes(status)) return res.status(400).json({ message: "Museum status must be ACTIVE or INACTIVE." });
+    try {
+        const result = await withConnection((db) => db.execute(
+            "UPDATE MUSEUMS SET STATUS = :status WHERE OWNER_USER_ID = :userId",
+            { status, userId: req.user.userId },
+            { autoCommit: true }
+        ));
+        if (!result.rowsAffected) return res.status(404).json({ message: "Museum profile not found." });
+        return res.json({ message: `Museum ${status === "ACTIVE" ? "activated" : "deactivated"} successfully.` });
+    } catch (error) {
+        console.error("Museum status update error:", error);
+        return res.status(500).json({ message: "Unable to update museum status." });
+    }
+});
+
+router.post("/museum-manager/artworks", authenticateToken, async (req, res) => {
+    if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
+    const title = String(req.body.title || "").trim();
+    const artistName = String(req.body.artistName || "").trim();
+    const category = String(req.body.category || "").trim();
+    const description = String(req.body.description || "").trim();
+    const exhibitionId = Number(req.body.exhibitionId);
+    const creationYear = req.body.creationYear ? Number(req.body.creationYear) : null;
+    if (!title || !artistName || !Number.isInteger(exhibitionId) || (creationYear !== null && (!Number.isInteger(creationYear) || creationYear < 1))) {
+        return res.status(400).json({ message: "Title, artist, and exhibition are required." });
+    }
+    try {
+        const result = await withConnection(async (db) => {
+            const exhibition = await db.execute(
+                `SELECT E.EXHIBITION_ID FROM EXHIBITIONS E JOIN MUSEUMS M ON M.MUSEUM_ID = E.MUSEUM_ID
+                 WHERE E.EXHIBITION_ID = :exhibitionId AND M.OWNER_USER_ID = :userId`,
+                { exhibitionId, userId: req.user.userId }
+            );
+            if (!exhibition.rows.length) return null;
+            return db.execute(
+                `INSERT INTO ARTWORKS (EXHIBITION_ID, TITLE, ARTIST_NAME, CREATION_YEAR, CATEGORY, DESCRIPTION, IMAGE_URL)
+                 VALUES (:exhibitionId, :title, :artistName, :creationYear, :category, :description, :imageUrl)
+                 RETURNING ARTWORK_ID INTO :artworkId`,
+                { exhibitionId, title, artistName, creationYear, category, description, imageUrl: String(req.body.imageUrl || "").trim() || null, artworkId: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER } },
+                { autoCommit: true }
+            );
+        });
+        if (!result) return res.status(404).json({ message: "Exhibition not found in your museum." });
+        return res.status(201).json({ artwork: { id: result.outBinds.artworkId[0], title } });
+    } catch (error) {
+        console.error("Create artwork error:", error);
+        return res.status(500).json({ message: "Unable to create artwork." });
+    }
+});
+
+router.put("/museum-manager/artworks/:id", authenticateToken, async (req, res) => {
+    if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
+    const exhibitionId = Number(req.body.exhibitionId);
+    const creationYear = req.body.creationYear ? Number(req.body.creationYear) : null;
+    try {
+        const result = await withConnection(async (db) => db.execute(
+            `UPDATE ARTWORKS A SET EXHIBITION_ID = :exhibitionId, TITLE = :title, ARTIST_NAME = :artistName,
+             CREATION_YEAR = :creationYear, CATEGORY = :category, DESCRIPTION = :description, IMAGE_URL = :imageUrl
+             WHERE A.ARTWORK_ID = :artworkId AND EXISTS (
+                 SELECT 1 FROM EXHIBITIONS E JOIN MUSEUMS M ON M.MUSEUM_ID = E.MUSEUM_ID
+                 WHERE E.EXHIBITION_ID = :exhibitionId AND M.OWNER_USER_ID = :userId
+             )`,
+            { exhibitionId, title: String(req.body.title || "").trim(), artistName: String(req.body.artistName || "").trim(), creationYear, category: String(req.body.category || "").trim(), description: String(req.body.description || "").trim(), imageUrl: String(req.body.imageUrl || "").trim() || null, artworkId: req.params.id, userId: req.user.userId },
+            { autoCommit: true }
+        ));
+        if (!result.rowsAffected) return res.status(404).json({ message: "Artwork not found in your museum." });
+        return res.json({ message: "Artwork updated." });
+    } catch (error) {
+        console.error("Update artwork error:", error);
+        return res.status(500).json({ message: "Unable to update artwork." });
+    }
+});
+
+router.delete("/museum-manager/artworks/:id", authenticateToken, async (req, res) => {
+    if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
+    try {
+        const result = await withConnection(async (db) => db.execute(
+            `DELETE FROM ARTWORKS A WHERE A.ARTWORK_ID = :artworkId AND EXISTS (
+                 SELECT 1 FROM EXHIBITIONS E JOIN MUSEUMS M ON M.MUSEUM_ID = E.MUSEUM_ID
+                 WHERE E.EXHIBITION_ID = A.EXHIBITION_ID AND M.OWNER_USER_ID = :userId
+             )`,
+            { artworkId: req.params.id, userId: req.user.userId },
+            { autoCommit: true }
+        ));
+        if (!result.rowsAffected) return res.status(404).json({ message: "Artwork not found in your museum." });
+        return res.json({ message: "Artwork deleted." });
+    } catch (error) {
+        console.error("Delete artwork error:", error);
+        return res.status(500).json({ message: "Unable to delete artwork." });
+    }
+});
+
+router.post("/museum-manager/exhibitions", authenticateToken, async (req, res) => {
+    if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
+    const title = String(req.body.title || "").trim();
+    const description = String(req.body.description || "").trim();
+    const startDate = String(req.body.startDate || "");
+    const endDate = String(req.body.endDate || "");
+    const ticketPrice = Number(req.body.ticketPrice);
+    const coverImage = String(req.body.coverImage || "").trim();
+    const status = String(req.body.status || "OPEN").toUpperCase();
+    if (!title || !startDate || !endDate || !Number.isFinite(ticketPrice) || ticketPrice < 0 || !["OPEN", "CLOSED", "CANCELLED"].includes(status)) {
+        return res.status(400).json({ message: "Title, dates, a valid ticket price, and status are required." });
+    }
+    if (endDate < startDate) return res.status(400).json({ message: "End date must be on or after the start date." });
+    try {
+        const result = await withConnection(async (db) => {
+            const museum = await db.execute("SELECT MUSEUM_ID FROM MUSEUMS WHERE OWNER_USER_ID = :userId", { userId: req.user.userId });
+            if (!museum.rows.length) throw Object.assign(new Error("Museum profile not found."), { status: 404 });
+            const inserted = await db.execute(
+                `INSERT INTO EXHIBITIONS (MUSEUM_ID, TITLE, DESCRIPTION, START_DATE, END_DATE, TICKET_PRICE, COVER_IMAGE, STATUS)
+                 VALUES (:museumId, :title, :description, TO_DATE(:startDate, 'YYYY-MM-DD'), TO_DATE(:endDate, 'YYYY-MM-DD'), :ticketPrice, :coverImage, :status)
+                 RETURNING EXHIBITION_ID INTO :exhibitionId`,
+                {
+                    museumId: museum.rows[0].MUSEUM_ID, title, description, startDate, endDate, ticketPrice, coverImage: coverImage || null, status,
+                    exhibitionId: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER },
+                },
+                { autoCommit: true }
+            );
+            return { id: inserted.outBinds.exhibitionId[0], title, startDate, endDate, ticketPrice, coverImage, status };
+        });
+
+        return res.status(201).json({ exhibition: result });
+    } catch (error) {
+        console.error("Create exhibition error:", error);
+        return res.status(error.status || 500).json({ message: error.status ? error.message : "Unable to create exhibition." });
+    }
+});
+
+router.put("/museum-manager/exhibitions/:id", authenticateToken, async (req, res) => {
+    if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
+    const title = String(req.body.title || "").trim();
+    const description = String(req.body.description || "").trim();
+    const startDate = String(req.body.startDate || "");
+    const endDate = String(req.body.endDate || "");
+    const ticketPrice = Number(req.body.ticketPrice);
+    const coverImage = String(req.body.coverImage || "").trim();
+    const status = String(req.body.status || "OPEN").toUpperCase();
+    if (!title || !startDate || !endDate || !Number.isFinite(ticketPrice) || ticketPrice < 0 || endDate < startDate || !["OPEN", "CLOSED", "CANCELLED"].includes(status)) {
+        return res.status(400).json({ message: "Enter valid exhibition details and dates." });
+    }
+    try {
+        const result = await withConnection(async (db) => db.execute(
+            `UPDATE EXHIBITIONS SET TITLE = :title, DESCRIPTION = :description,
+             START_DATE = TO_DATE(:startDate, 'YYYY-MM-DD'), END_DATE = TO_DATE(:endDate, 'YYYY-MM-DD'),
+             TICKET_PRICE = :ticketPrice, COVER_IMAGE = :coverImage, STATUS = :status
+             WHERE EXHIBITION_ID = :exhibitionId
+             AND MUSEUM_ID = (SELECT MUSEUM_ID FROM MUSEUMS WHERE OWNER_USER_ID = :userId)`,
+            { title, description, startDate, endDate, ticketPrice, coverImage: coverImage || null, status, exhibitionId: req.params.id, userId: req.user.userId },
+            { autoCommit: true }
+        ));
+        if (!result.rowsAffected) return res.status(404).json({ message: "Exhibition not found in your museum." });
+        return res.json({ message: "Exhibition updated." });
+    } catch (error) {
+        console.error("Update exhibition error:", error);
+        return res.status(500).json({ message: "Unable to update exhibition." });
+    }
+});
+
+router.delete("/museum-manager/exhibitions/:id", authenticateToken, async (req, res) => {
+    if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
+    try {
+        const result = await withConnection(async (db) => db.execute(
+            `DELETE FROM EXHIBITIONS WHERE EXHIBITION_ID = :exhibitionId
+             AND MUSEUM_ID = (SELECT MUSEUM_ID FROM MUSEUMS WHERE OWNER_USER_ID = :userId)`,
+            { exhibitionId: req.params.id, userId: req.user.userId },
+            { autoCommit: true }
+        ));
+        if (!result.rowsAffected) return res.status(404).json({ message: "Exhibition not found in your museum." });
+        return res.json({ message: "Exhibition deleted." });
+    } catch (error) {
+        console.error("Delete exhibition error:", error);
+        if (error.errorNum === 2292) return res.status(409).json({ message: "This exhibition has related artworks or tickets and cannot be deleted. Mark it closed instead." });
+        return res.status(500).json({ message: "Unable to delete exhibition." });
+    }
+});
+
+router.get("/museum-manager/tickets", authenticateToken, async (req, res) => {
+    if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const pageSize = Math.min(50, Math.max(10, Number(req.query.pageSize) || 20));
+    const search = String(req.query.search || "").trim().toLowerCase();
+    const status = String(req.query.status || "").toUpperCase();
+    const paymentStatus = String(req.query.paymentStatus || "").toUpperCase();
+    const exhibitionId = Number(req.query.exhibitionId);
+    const date = String(req.query.date || "");
+    const binds = {
+        userId: req.user.userId,
+        searchName: `%${search}%`,
+        searchEmail: `%${search}%`,
+        searchExhibition: `%${search}%`,
+        searchTicket: `%${search}%`,
+        rowStart: (page - 1) * pageSize + 1,
+        rowEnd: page * pageSize,
+    };
+    const conditions = [
+        "M.OWNER_USER_ID = :userId",
+        "(:searchName = '%%' OR LOWER(U.NAME) LIKE :searchName OR LOWER(U.EMAIL) LIKE :searchEmail OR LOWER(E.TITLE) LIKE :searchExhibition OR TO_CHAR(T.TICKET_ID) LIKE :searchTicket)",
+    ];
+    if (["PENDING", "CONFIRMED", "CANCELLED"].includes(status)) { conditions.push("T.STATUS = :status"); binds.status = status; }
+    if (["SUCCESS", "PROCESSING", "FAILED", "REFUNDED"].includes(paymentStatus)) { conditions.push("NVL(P.STATUS, 'PENDING') = :paymentStatus"); binds.paymentStatus = paymentStatus; }
+    if (Number.isInteger(exhibitionId)) { conditions.push("E.EXHIBITION_ID = :exhibitionId"); binds.exhibitionId = exhibitionId; }
+    if (date === "today") conditions.push("TRUNC(T.VISIT_DATE) = TRUNC(SYSDATE)");
+    if (date === "tomorrow") conditions.push("TRUNC(T.VISIT_DATE) = TRUNC(SYSDATE + 1)");
+    if (date === "week") conditions.push("T.VISIT_DATE >= TRUNC(SYSDATE, 'IW') AND T.VISIT_DATE < TRUNC(SYSDATE, 'IW') + 7");
+    if (date === "month") conditions.push("T.VISIT_DATE >= TRUNC(SYSDATE, 'MM') AND T.VISIT_DATE < ADD_MONTHS(TRUNC(SYSDATE, 'MM'), 1)");
+    try {
+        const result = await withConnection(async (db) => {
+            const from = `FROM TICKETS T JOIN USERS U ON U.USER_ID = T.USER_ID
+                JOIN EXHIBITIONS E ON E.EXHIBITION_ID = T.EXHIBITION_ID
+                JOIN MUSEUMS M ON M.MUSEUM_ID = E.MUSEUM_ID
+                LEFT JOIN (SELECT PAYMENT_ID, TICKET_ID, STATUS, PAYMENT_METHOD, TRANSACTION_ID,
+                                  ROW_NUMBER() OVER (PARTITION BY TICKET_ID ORDER BY PAYMENT_ID DESC) AS PAYMENT_ROW
+                           FROM PAYMENTS) P ON P.TICKET_ID = T.TICKET_ID AND P.PAYMENT_ROW = 1
+                WHERE ${conditions.join(" AND ")}`;
+            const countBinds = { ...binds };
+            delete countBinds.rowStart;
+            delete countBinds.rowEnd;
+            const count = await db.execute(`SELECT COUNT(*) AS "total" ${from}`, countBinds);
+            const tickets = await db.execute(
+                `SELECT * FROM (SELECT T.TICKET_ID AS "ticketId", U.NAME AS "visitorName", U.EMAIL AS "visitorEmail",
+                        U.PHONE AS "visitorPhone", E.EXHIBITION_ID AS "exhibitionId", E.TITLE AS "exhibitionTitle",
+                        M.NAME AS "museumName", TO_CHAR(T.VISIT_DATE, 'YYYY-MM-DD') AS "visitDate",
+                        TO_CHAR(T.BOOKED_AT, 'YYYY-MM-DD HH24:MI') AS "bookedAt", T.PRICE AS "amount",
+                        T.STATUS AS "status", NVL(P.STATUS, 'PENDING') AS "paymentStatus",
+                        P.PAYMENT_METHOD AS "paymentMethod", P.TRANSACTION_ID AS "transactionId",
+                        ROW_NUMBER() OVER (ORDER BY T.BOOKED_AT DESC) AS "rowNumber"
+                 ${from}) WHERE "rowNumber" BETWEEN :rowStart AND :rowEnd`,
+                binds
+            );
+            const stats = await db.execute(
+                `SELECT COUNT(*) AS "total", NVL(SUM(CASE WHEN TRUNC(T.VISIT_DATE) = TRUNC(SYSDATE) THEN 1 ELSE 0 END), 0) AS "today",
+                    NVL(SUM(CASE WHEN T.STATUS = 'CONFIRMED' THEN 1 ELSE 0 END), 0) AS "confirmed",
+                    NVL(SUM(CASE WHEN T.STATUS = 'PENDING' THEN 1 ELSE 0 END), 0) AS "pending",
+                    NVL(SUM(CASE WHEN T.STATUS = 'CANCELLED' THEN 1 ELSE 0 END), 0) AS "cancelled"
+                 FROM TICKETS T JOIN EXHIBITIONS E ON E.EXHIBITION_ID = T.EXHIBITION_ID
+                 JOIN MUSEUMS M ON M.MUSEUM_ID = E.MUSEUM_ID WHERE M.OWNER_USER_ID = :userId`,
+                { userId: req.user.userId }
+            );
+            const exhibitions = await db.execute(
+                `SELECT E.EXHIBITION_ID AS "id", E.TITLE AS "title" FROM EXHIBITIONS E
+                 JOIN MUSEUMS M ON M.MUSEUM_ID = E.MUSEUM_ID WHERE M.OWNER_USER_ID = :userId ORDER BY E.TITLE`,
+                { userId: req.user.userId }
+            );
+            return { tickets: tickets.rows, total: Number(count.rows[0].total), stats: stats.rows[0], exhibitions: exhibitions.rows };
+        });
+        return res.json({ ...result, page, pageSize, totalPages: Math.max(1, Math.ceil(result.total / pageSize)) });
+    } catch (error) {
+        console.error("Museum ticket management error:", error);
+        return res.status(500).json({ message: "Unable to load museum tickets." });
+    }
+});
+
 router.get("/museum-manager/dashboard", authenticateToken, async (req, res) => {
     if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
     try {
         const data = await withConnection(async (db) => {
             const museum = await db.execute(
                 `SELECT M.MUSEUM_ID AS "id", M.NAME AS "name", M.LOCATION AS "location", M.DESCRIPTION AS "description",
-                        OPENING_TIME AS "openingTime", CLOSING_TIME AS "closingTime"
+                        M.PHONE AS "phone", M.EMAIL AS "email", M.WEBSITE_URL AS "websiteUrl",
+                        M.OPENING_TIME AS "openingTime", M.CLOSING_TIME AS "closingTime", M.STATUS AS "status",
+                        M.CREATED_AT AS "createdAt"
                     , U.NAME AS "ownerName", U.EMAIL AS "ownerEmail", U.ROLE AS "ownerRole"
                  FROM MUSEUMS M JOIN USERS U ON U.USER_ID = M.OWNER_USER_ID WHERE M.OWNER_USER_ID = :userId`,
                 { userId: req.user.userId }
@@ -368,7 +636,7 @@ router.get("/museum-manager/dashboard", authenticateToken, async (req, res) => {
             const artworks = await db.execute(
                 `SELECT A.ARTWORK_ID AS "id", A.EXHIBITION_ID AS "exhibitionId", A.TITLE AS "title", A.ARTIST_NAME AS "artistName",
                         A.CREATION_YEAR AS "creationYear", A.CATEGORY AS "category", A.DESCRIPTION AS "description",
-                        E.TITLE AS "exhibitionTitle"
+                        E.TITLE AS "exhibitionTitle", A.IMAGE_URL AS "imageUrl"
                  FROM ARTWORKS A JOIN EXHIBITIONS E ON E.EXHIBITION_ID = A.EXHIBITION_ID
                  WHERE E.MUSEUM_ID = :museumId ORDER BY A.TITLE`,
                 { museumId }
@@ -427,166 +695,6 @@ router.get("/museum-manager/dashboard", authenticateToken, async (req, res) => {
             return { museum: museum.rows[0], exhibitions: exhibitions.rows, artworks: artworks.rows, bookings: bookings.rows, reviews: reviews.rows, paymentStats: paymentStats.rows[0], stats: stats.rows[0] };
         });
 
-        router.post("/museum-manager/artworks", authenticateToken, async (req, res) => {
-            if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
-            const title = String(req.body.title || "").trim();
-            const artistName = String(req.body.artistName || "").trim();
-            const category = String(req.body.category || "").trim();
-            const description = String(req.body.description || "").trim();
-            const exhibitionId = Number(req.body.exhibitionId);
-            const creationYear = req.body.creationYear ? Number(req.body.creationYear) : null;
-            if (!title || !artistName || !Number.isInteger(exhibitionId) || (creationYear !== null && (!Number.isInteger(creationYear) || creationYear < 1))) {
-                return res.status(400).json({ message: "Title, artist, and exhibition are required." });
-            }
-            try {
-                const result = await withConnection(async (db) => {
-                    const exhibition = await db.execute(
-                        `SELECT E.EXHIBITION_ID FROM EXHIBITIONS E JOIN MUSEUMS M ON M.MUSEUM_ID = E.MUSEUM_ID
-                         WHERE E.EXHIBITION_ID = :exhibitionId AND M.OWNER_USER_ID = :userId`,
-                        { exhibitionId, userId: req.user.userId }
-                    );
-                    if (!exhibition.rows.length) return null;
-                    return db.execute(
-                        `INSERT INTO ARTWORKS (EXHIBITION_ID, TITLE, ARTIST_NAME, CREATION_YEAR, CATEGORY, DESCRIPTION)
-                         VALUES (:exhibitionId, :title, :artistName, :creationYear, :category, :description)
-                         RETURNING ARTWORK_ID INTO :artworkId`,
-                        { exhibitionId, title, artistName, creationYear, category, description, artworkId: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER } },
-                        { autoCommit: true }
-                    );
-                });
-                if (!result) return res.status(404).json({ message: "Exhibition not found in your museum." });
-                return res.status(201).json({ artwork: { id: result.outBinds.artworkId[0], title } });
-            } catch (error) {
-                console.error("Create artwork error:", error);
-                return res.status(500).json({ message: "Unable to create artwork." });
-            }
-        });
-
-        router.put("/museum-manager/artworks/:id", authenticateToken, async (req, res) => {
-            if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
-            const exhibitionId = Number(req.body.exhibitionId);
-            const creationYear = req.body.creationYear ? Number(req.body.creationYear) : null;
-            try {
-                const result = await withConnection(async (db) => db.execute(
-                    `UPDATE ARTWORKS A SET EXHIBITION_ID = :exhibitionId, TITLE = :title, ARTIST_NAME = :artistName,
-                     CREATION_YEAR = :creationYear, CATEGORY = :category, DESCRIPTION = :description
-                     WHERE A.ARTWORK_ID = :artworkId AND EXISTS (
-                         SELECT 1 FROM EXHIBITIONS E JOIN MUSEUMS M ON M.MUSEUM_ID = E.MUSEUM_ID
-                         WHERE E.EXHIBITION_ID = :exhibitionId AND M.OWNER_USER_ID = :userId
-                     )`,
-                    { exhibitionId, title: String(req.body.title || "").trim(), artistName: String(req.body.artistName || "").trim(), creationYear, category: String(req.body.category || "").trim(), description: String(req.body.description || "").trim(), artworkId: req.params.id, userId: req.user.userId },
-                    { autoCommit: true }
-                ));
-                if (!result.rowsAffected) return res.status(404).json({ message: "Artwork not found in your museum." });
-                return res.json({ message: "Artwork updated." });
-            } catch (error) {
-                console.error("Update artwork error:", error);
-                return res.status(500).json({ message: "Unable to update artwork." });
-            }
-        });
-
-        router.delete("/museum-manager/artworks/:id", authenticateToken, async (req, res) => {
-            if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
-            try {
-                const result = await withConnection(async (db) => db.execute(
-                    `DELETE FROM ARTWORKS A WHERE A.ARTWORK_ID = :artworkId AND EXISTS (
-                         SELECT 1 FROM EXHIBITIONS E JOIN MUSEUMS M ON M.MUSEUM_ID = E.MUSEUM_ID
-                         WHERE E.EXHIBITION_ID = A.EXHIBITION_ID AND M.OWNER_USER_ID = :userId
-                     )`,
-                    { artworkId: req.params.id, userId: req.user.userId },
-                    { autoCommit: true }
-                ));
-                if (!result.rowsAffected) return res.status(404).json({ message: "Artwork not found in your museum." });
-                return res.json({ message: "Artwork deleted." });
-            } catch (error) {
-                console.error("Delete artwork error:", error);
-                return res.status(500).json({ message: "Unable to delete artwork." });
-            }
-        });
-
-        router.post("/museum-manager/exhibitions", authenticateToken, async (req, res) => {
-            if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
-            const title = String(req.body.title || "").trim();
-            const description = String(req.body.description || "").trim();
-            const startDate = String(req.body.startDate || "");
-            const endDate = String(req.body.endDate || "");
-            const ticketPrice = Number(req.body.ticketPrice);
-            const coverImage = String(req.body.coverImage || "").trim();
-            const status = String(req.body.status || "OPEN").toUpperCase();
-            if (!title || !startDate || !endDate || !Number.isFinite(ticketPrice) || ticketPrice < 0 || !["OPEN", "CLOSED", "CANCELLED"].includes(status)) {
-                return res.status(400).json({ message: "Title, dates, a valid ticket price, and status are required." });
-            }
-            if (endDate < startDate) return res.status(400).json({ message: "End date must be on or after the start date." });
-            try {
-                const result = await withConnection(async (db) => {
-                    const museum = await db.execute("SELECT MUSEUM_ID FROM MUSEUMS WHERE OWNER_USER_ID = :userId", { userId: req.user.userId });
-                    if (!museum.rows.length) throw Object.assign(new Error("Museum profile not found."), { status: 404 });
-                    const inserted = await db.execute(
-                        `INSERT INTO EXHIBITIONS (MUSEUM_ID, TITLE, DESCRIPTION, START_DATE, END_DATE, TICKET_PRICE, COVER_IMAGE, STATUS)
-                         VALUES (:museumId, :title, :description, TO_DATE(:startDate, 'YYYY-MM-DD'), TO_DATE(:endDate, 'YYYY-MM-DD'), :ticketPrice, :coverImage, :status)
-                         RETURNING EXHIBITION_ID INTO :exhibitionId`,
-                        {
-                            museumId: museum.rows[0].MUSEUM_ID, title, description, startDate, endDate, ticketPrice, coverImage: coverImage || null, status,
-                            exhibitionId: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER },
-                        },
-                        { autoCommit: true }
-                    );
-                    return { id: inserted.outBinds.exhibitionId[0], title, startDate, endDate, ticketPrice, coverImage, status };
-                });
-
-                router.put("/museum-manager/exhibitions/:id", authenticateToken, async (req, res) => {
-                    if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
-                    const title = String(req.body.title || "").trim();
-                    const description = String(req.body.description || "").trim();
-                    const startDate = String(req.body.startDate || "");
-                    const endDate = String(req.body.endDate || "");
-                    const ticketPrice = Number(req.body.ticketPrice);
-                    const coverImage = String(req.body.coverImage || "").trim();
-                    const status = String(req.body.status || "OPEN").toUpperCase();
-                    if (!title || !startDate || !endDate || !Number.isFinite(ticketPrice) || ticketPrice < 0 || endDate < startDate || !["OPEN", "CLOSED", "CANCELLED"].includes(status)) {
-                        return res.status(400).json({ message: "Enter valid exhibition details and dates." });
-                    }
-                    try {
-                        const result = await withConnection(async (db) => db.execute(
-                            `UPDATE EXHIBITIONS SET TITLE = :title, DESCRIPTION = :description,
-                             START_DATE = TO_DATE(:startDate, 'YYYY-MM-DD'), END_DATE = TO_DATE(:endDate, 'YYYY-MM-DD'),
-                             TICKET_PRICE = :ticketPrice, COVER_IMAGE = :coverImage, STATUS = :status
-                             WHERE EXHIBITION_ID = :exhibitionId
-                             AND MUSEUM_ID = (SELECT MUSEUM_ID FROM MUSEUMS WHERE OWNER_USER_ID = :userId)`,
-                            { title, description, startDate, endDate, ticketPrice, coverImage: coverImage || null, status, exhibitionId: req.params.id, userId: req.user.userId },
-                            { autoCommit: true }
-                        ));
-                        if (!result.rowsAffected) return res.status(404).json({ message: "Exhibition not found in your museum." });
-                        return res.json({ message: "Exhibition updated." });
-                    } catch (error) {
-                        console.error("Update exhibition error:", error);
-                        return res.status(500).json({ message: "Unable to update exhibition." });
-                    }
-                });
-
-                router.delete("/museum-manager/exhibitions/:id", authenticateToken, async (req, res) => {
-                    if (req.user.role !== "MUSEUM_MANAGER") return res.status(403).json({ message: "Museum manager access is required." });
-                    try {
-                        const result = await withConnection(async (db) => db.execute(
-                            `DELETE FROM EXHIBITIONS WHERE EXHIBITION_ID = :exhibitionId
-                             AND MUSEUM_ID = (SELECT MUSEUM_ID FROM MUSEUMS WHERE OWNER_USER_ID = :userId)`,
-                            { exhibitionId: req.params.id, userId: req.user.userId },
-                            { autoCommit: true }
-                        ));
-                        if (!result.rowsAffected) return res.status(404).json({ message: "Exhibition not found in your museum." });
-                        return res.json({ message: "Exhibition deleted." });
-                    } catch (error) {
-                        console.error("Delete exhibition error:", error);
-                        if (error.errorNum === 2292) return res.status(409).json({ message: "This exhibition has related artworks or tickets and cannot be deleted. Mark it closed instead." });
-                        return res.status(500).json({ message: "Unable to delete exhibition." });
-                    }
-                });
-                return res.status(201).json({ exhibition: result });
-            } catch (error) {
-                console.error("Create exhibition error:", error);
-                return res.status(error.status || 500).json({ message: error.status ? error.message : "Unable to create exhibition." });
-            }
-        });
         return res.json(data);
     } catch (error) {
         console.error("Museum manager dashboard error:", error);

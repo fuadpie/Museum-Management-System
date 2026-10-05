@@ -1,4 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
+import imageOne from "../assets/auth-image-1.png";
+import imageTwo from "../assets/auth-image-2.png";
+import imageThree from "../assets/auth-image-3.png";
+import imageFour from "../assets/auth-image-4.png";
 
 const API_URL = "http://localhost:5000/api/auth";
 
@@ -7,26 +11,47 @@ const emptyRegistration = {
     password: "", confirmPassword: "", interests: "", newsletter: false,
 };
 
+const MINIMUM_AGE = 16;
+
+const formatDate = (date) => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+};
+
+const getLatestBirthDate = () => {
+    const date = new Date();
+    date.setFullYear(date.getFullYear() - MINIMUM_AGE);
+    return formatDate(date);
+};
+
 function Auth({ onLoginSuccess }) {
     const [mode, setMode] = useState("login");
-    const [poster, setPoster] = useState(0);
+    const [galleryIndex, setGalleryIndex] = useState(0);
     const [role, setRole] = useState("USER");
     const [form, setForm] = useState({ ...emptyRegistration, museumName: "", location: "", museumDescription: "" });
     const [remember, setRemember] = useState(false);
     const [showPassword, setShowPassword] = useState(false);
     const [status, setStatus] = useState({ type: "", message: "" });
     const [busy, setBusy] = useState(false);
-    const posters = [
-        ["Quiet forms, loud ideas.", "Sculpture / 04", "poster-sculpture"],
-        ["Light finds its way in.", "Modern collection / 12", "poster-light"],
-        ["A room for the unexpected.", "Contemporary / 18", "poster-forms"],
-        ["History, held in colour.", "Archive / 27", "poster-colour"],
+    const [resetOpen, setResetOpen] = useState(false);
+    const [resetToken, setResetToken] = useState("");
+    const [resetForm, setResetForm] = useState({ email: "", password: "", confirmPassword: "" });
+    const [resetStatus, setResetStatus] = useState({ type: "", message: "" });
+    const [resetBusy, setResetBusy] = useState(false);
+    const latestBirthDate = getLatestBirthDate();
+    const galleryImages = [
+        [imageOne, "A moment of courage"],
+        [imageTwo, "A nation in celebration"],
+        [imageThree, "The night sky in motion"],
+        [imageFour, "A story drawn from memory"],
     ];
 
     useEffect(() => {
-        const timer = window.setInterval(() => setPoster((current) => (current + 1) % posters.length), 5200);
+        const timer = window.setInterval(() => setGalleryIndex((current) => (current + 1) % galleryImages.length), 5200);
         return () => window.clearInterval(timer);
-    }, [posters.length]);
+    }, [galleryImages.length]);
 
     const passwordScore = useMemo(() => [
         form.password.length >= 8, /[A-Z]/.test(form.password),
@@ -41,6 +66,10 @@ function Auth({ onLoginSuccess }) {
 
     const submit = async (event) => {
         event.preventDefault();
+        if (mode === "register" && (!form.birthDate || form.birthDate > latestBirthDate)) {
+            setStatus({ type: "error", message: "You must be at least 16 years old to create an account." });
+            return;
+        }
         if (mode === "register" && (form.password !== form.confirmPassword || passwordScore < 3)) {
             setStatus({ type: "error", message: form.password !== form.confirmPassword ? "Passwords do not match." : "Use 8+ characters with a capital, number, and symbol." });
             return;
@@ -75,17 +104,82 @@ function Auth({ onLoginSuccess }) {
         } finally { setBusy(false); }
     };
 
+    const openReset = () => {
+        setResetForm((current) => ({ ...current, email: form.email }));
+        setResetToken("");
+        setResetStatus({ type: "", message: "" });
+        setResetOpen(true);
+    };
+
+    const closeReset = () => {
+        if (!resetBusy) setResetOpen(false);
+    };
+
+    const updateReset = (event) => {
+        const { name, value } = event.target;
+        setResetForm((current) => ({ ...current, [name]: value }));
+        setResetStatus({ type: "", message: "" });
+    };
+
+    const requestReset = async (event) => {
+        event.preventDefault();
+        setResetBusy(true);
+        setResetStatus({ type: "", message: "" });
+        try {
+            const response = await fetch(`${API_URL}/forgot-password`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ email: resetForm.email }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.message || "Unable to start password reset.");
+            if (!data.resetToken) {
+                setResetStatus({ type: "success", message: data.message });
+                return;
+            }
+            setResetToken(data.resetToken);
+            setResetStatus({ type: "success", message: "Your reset request is ready. Choose a new password below." });
+        } catch (error) {
+            setResetStatus({ type: "error", message: error.message || "Unable to start password reset." });
+        } finally { setResetBusy(false); }
+    };
+
+    const resetPassword = async (event) => {
+        event.preventDefault();
+        if (resetForm.password.length < 8) {
+            setResetStatus({ type: "error", message: "Use at least 8 characters for your new password." });
+            return;
+        }
+        if (resetForm.password !== resetForm.confirmPassword) {
+            setResetStatus({ type: "error", message: "Passwords do not match." });
+            return;
+        }
+        setResetBusy(true);
+        setResetStatus({ type: "", message: "" });
+        try {
+            const response = await fetch(`${API_URL}/reset-password`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ token: resetToken, password: resetForm.password }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.message || "Unable to reset password.");
+            setResetStatus({ type: "success", message: "Password reset successfully. You can sign in now." });
+            setResetToken("");
+            setResetForm((current) => ({ ...current, password: "", confirmPassword: "" }));
+        } catch (error) {
+            setResetStatus({ type: "error", message: error.message || "Unable to reset password." });
+        } finally { setResetBusy(false); }
+    };
+
     return (
         <main className="auth-shell">
             <section className="auth-art">
-                <div className="poster-slides" aria-label="Featured artwork">
-                    {posters.map(([title, meta, className], index) => <div className={`poster-slide ${className} ${poster === index ? "visible" : ""}`} key={title}>
-                        <div className="poster-shape poster-shape-one" /><div className="poster-shape poster-shape-two" /><div className="poster-shape poster-shape-three" />
-                        <div className="poster-caption"><span>{meta}</span><strong>{title}</strong></div>
-                    </div>)}
+                <div className="auth-gallery" aria-label="Featured collection">
+                    <img src={galleryImages[galleryIndex][0]} alt={galleryImages[galleryIndex][1]} />
                 </div>
-                <div className="auth-art-top"><div className="auth-brand"><span>M</span> MUSEUM / 24</div><span className="poster-count">{String(poster + 1).padStart(2, "0")} / {String(posters.length).padStart(2, "0")}</span></div>
-                <div className="poster-controls">{posters.map(([title], index) => <button aria-label={`Show artwork ${index + 1}: ${title}`} className={poster === index ? "active" : ""} key={title} onClick={() => setPoster(index)} />)}</div>
+                <div className="auth-art-top"><div className="auth-brand"><span>M</span> MUSEUM / 24</div><span className="poster-count">{String(galleryIndex + 1).padStart(2, "0")} / {String(galleryImages.length).padStart(2, "0")}</span></div>
+                <div className="gallery-controls">{galleryImages.map(([source, alt], index) => <button type="button" aria-label={`Show image ${index + 1}: ${alt}`} className={galleryIndex === index ? "active" : ""} key={source} onClick={() => setGalleryIndex(index)} />)}</div>
                 <div className="auth-art-footer">Member access · Since 1924</div>
             </section>
             <section className="auth-panel">
@@ -98,7 +192,7 @@ function Auth({ onLoginSuccess }) {
                         {mode === "login" ? <>
                             <div className="auth-field"><label htmlFor="email">Email address</label><input id="email" name="email" type="email" value={form.email} onChange={update} placeholder="you@example.com" autoComplete="email" required /></div>
                             <div className="auth-field"><label htmlFor="password">Password</label><div className="password-wrap"><input id="password" name="password" type={showPassword ? "text" : "password"} value={form.password} onChange={update} placeholder="Enter your password" autoComplete="current-password" required /><button type="button" onClick={() => setShowPassword((value) => !value)}>{showPassword ? "Hide" : "Show"}</button></div></div>
-                            <div className="auth-options"><label><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} /> Keep me signed in</label><button type="button">Forgot password?</button></div>
+                            <div className="auth-options"><label><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} /> Keep me signed in</label><button type="button" onClick={openReset}>Forgot password?</button></div>
                         </> : mode === "museum" ? <>
                             <div className="auth-field"><label htmlFor="name">Manager name</label><input id="name" name="name" value={form.name} onChange={update} placeholder="Museum director" required /></div>
                             <div className="auth-field"><label htmlFor="museumName">Museum name</label><input id="museumName" name="museumName" value={form.museumName} onChange={update} placeholder="The Modern House" required /></div>
@@ -109,7 +203,7 @@ function Auth({ onLoginSuccess }) {
                         </> : <>
                             <div className="auth-form-grid"><div className="auth-field"><label htmlFor="name">Full name</label><input id="name" name="name" value={form.name} onChange={update} placeholder="Ada Lovelace" autoComplete="name" required /></div><div className="auth-field"><label htmlFor="phone">Phone number</label><input id="phone" name="phone" type="tel" value={form.phone} onChange={update} placeholder="+880 1..." autoComplete="tel" /></div></div>
                             <div className="auth-field"><label htmlFor="email">Email address</label><input id="email" name="email" type="email" value={form.email} onChange={update} placeholder="you@example.com" autoComplete="email" required /></div>
-                            <div className="auth-form-grid"><div className="auth-field"><label htmlFor="birthDate">Date of birth</label><input id="birthDate" name="birthDate" type="date" value={form.birthDate} onChange={update} /></div><div className="auth-field"><label htmlFor="city">City</label><input id="city" name="city" value={form.city} onChange={update} placeholder="Dhaka" autoComplete="address-level2" /></div></div>
+                            <div className="auth-form-grid"><div className="auth-field"><label htmlFor="birthDate">Date of birth</label><input id="birthDate" name="birthDate" type="date" value={form.birthDate} max={latestBirthDate} onChange={update} required aria-describedby="birthDate-error" aria-invalid={Boolean(form.birthDate && form.birthDate > latestBirthDate)} />{form.birthDate && form.birthDate > latestBirthDate && <small id="birthDate-error" className="field-error">You must be at least 16 years old to create an account.</small>}</div><div className="auth-field"><label htmlFor="city">City</label><input id="city" name="city" value={form.city} onChange={update} placeholder="Dhaka" autoComplete="address-level2" /></div></div>
                             <div className="auth-field"><label htmlFor="country">Country</label><input id="country" name="country" value={form.country} onChange={update} placeholder="Bangladesh" autoComplete="country-name" /></div>
                             <div className="auth-field"><label htmlFor="interests">Art interests <span>(optional)</span></label><input id="interests" name="interests" value={form.interests} onChange={update} placeholder="Modern art, sculpture, history..." /></div>
                             <div className="auth-field"><label htmlFor="password">Password</label><div className="password-wrap"><input id="password" name="password" type={showPassword ? "text" : "password"} value={form.password} onChange={update} placeholder="Create a strong password" autoComplete="new-password" required /><button type="button" onClick={() => setShowPassword((value) => !value)}>{showPassword ? "Hide" : "Show"}</button></div><div className="password-meter">{[0, 1, 2, 3].map((item) => <i className={item < passwordScore ? "active" : ""} key={item} />)}</div></div>
@@ -128,6 +222,23 @@ function Auth({ onLoginSuccess }) {
                     </div>}
                 </div>
             </section>
+            {resetOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeReset(); }}>
+                <section className="booking-modal reset-modal" role="dialog" aria-modal="true" aria-labelledby="reset-title">
+                    <button className="modal-close" type="button" onClick={closeReset} aria-label="Close password reset">×</button>
+                    <p className="eyebrow">Account recovery</p>
+                    <h2 id="reset-title">Reset your password.</h2>
+                    <p>{resetToken ? "Choose a new password for your museum account." : "Enter your email and we will prepare a password reset."}</p>
+                    {!resetToken ? <form onSubmit={requestReset}>
+                        <div className="auth-field"><label htmlFor="reset-email">Email address</label><input id="reset-email" name="email" type="email" value={resetForm.email} onChange={updateReset} autoComplete="email" required /></div>
+                        <button className="primary-button" type="submit" disabled={resetBusy}>{resetBusy ? "Preparing reset..." : "Continue"}</button>
+                    </form> : <form onSubmit={resetPassword}>
+                        <div className="auth-field"><label htmlFor="reset-password">New password</label><input id="reset-password" name="password" type="password" value={resetForm.password} onChange={updateReset} autoComplete="new-password" required minLength="8" /></div>
+                        <div className="auth-field"><label htmlFor="reset-confirm-password">Confirm new password</label><input id="reset-confirm-password" name="confirmPassword" type="password" value={resetForm.confirmPassword} onChange={updateReset} autoComplete="new-password" required minLength="8" /></div>
+                        <button className="primary-button" type="submit" disabled={resetBusy}>{resetBusy ? "Updating password..." : "Set new password"}</button>
+                    </form>}
+                    <p className={`auth-status ${resetStatus.type}`} role="status">{resetStatus.message}</p>
+                </section>
+            </div>}
         </main>
     );
 }
